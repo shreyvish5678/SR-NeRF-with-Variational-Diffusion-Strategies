@@ -161,6 +161,8 @@ def main(args, extras) -> None:
             )
         )()
 
+    print("Starting Training...")
+
     trainer = Trainer(
         callbacks=callbacks,
         logger=loggers,

@@ -4,6 +4,7 @@
 /data
 test*
 .threestudio_cache
+tiny-cuda-nn
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

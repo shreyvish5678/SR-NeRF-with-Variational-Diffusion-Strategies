@@ -1,0 +1,4 @@
+Defaulting to user installation because normal site-packages is not writeable
+Requirement already satisfied: imageio in /home/ubuntu/.local/lib/python3.10/site-packages (2.34.2)
+Requirement already satisfied: numpy in /home/ubuntu/.local/lib/python3.10/site-packages (from imageio) (1.26.4)
+Requirement already satisfied: pillow>=8.3.2 in /home/ubuntu/.local/lib/python3.10/site-packages (from imageio) (10.4.0)

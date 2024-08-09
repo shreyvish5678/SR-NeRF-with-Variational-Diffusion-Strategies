@@ -68,6 +68,7 @@ class ExperimentConfig:
     system_type: str = ""
     system: dict = field(default_factory=dict)
 
+
     # accept pytorch-lightning trainer parameters
     # see https://lightning.ai/docs/pytorch/stable/common/trainer.html#trainer-class-api
     trainer: dict = field(default_factory=dict)

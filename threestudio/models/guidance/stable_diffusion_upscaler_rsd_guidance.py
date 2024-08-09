@@ -31,8 +31,6 @@ from threestudio.utils.typing import *
 import PIL
 import numpy as np
 
-
-
 @threestudio.register("stable-diffusion-upscaler-rsd-guidance")
 class StableDiffusionUpscalerRSDGuidance(BaseModule):
     @dataclass
@@ -599,6 +597,7 @@ class StableDiffusionUpscalerRSDGuidance(BaseModule):
 
     @torch.no_grad()
     @torch.cuda.amp.autocast(enabled=False)
+    # formula --> E_{t, \e}(\gamma(t)(\e_pred(z_t, y, t)) - \e))
     def compute_grad_sds(
         self,
         latents: Float[Tensor, "B 4 64 64"],
@@ -660,6 +659,9 @@ class StableDiffusionUpscalerRSDGuidance(BaseModule):
         grad = w * (noise_pred_pretrain - noise) # epsilon SDS
 
         return grad
+        
+        
+
 
     def forward(
         self,
@@ -736,7 +738,7 @@ class StableDiffusionUpscalerRSDGuidance(BaseModule):
                             noise_level=noise_level)
             grad = torch.nan_to_num(grad) 
             target = (latents - grad).detach()
-            return latents, target    
+            return latents, target   
 
         raise ValueError(f"Invalid guidance type: {self.cfg.guidance_type}")  
     
