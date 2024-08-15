@@ -658,7 +658,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
                     unet,
                     latent_model_input,
                     torch.cat([t] * 2),
-                    encoder_hidden_states=text_embeddings.to(self.weights_dtype),
+                    encoder_hidden_states=text_embeddings_vd.to(self.weights_dtype),
                     cross_attention_kwargs=cross_attention_kwargs,
                 )
             # use view-independent text embeddings in LoRA
