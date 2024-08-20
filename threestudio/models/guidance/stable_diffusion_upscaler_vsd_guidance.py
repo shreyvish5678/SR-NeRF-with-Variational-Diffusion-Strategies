@@ -778,7 +778,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         grad_img = None
         return grad, grad_img
 
-    def train_lora(
+        def train_lora(
         self,
         image: Float[Tensor, "B 3 256 256"],
         latents: Float[Tensor, "B 4 64 64"],
@@ -787,43 +787,73 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
     ):
         B = latents.shape[0]
         latents = latents.detach().repeat(self.cfg.lora_n_timestamp_samples, 1, 1, 1)
-        # pred noise
-        t = torch.randint(
-            int(self.num_train_timesteps * 0.0),
-            int(self.num_train_timesteps * 1.0),
-            [B * self.cfg.lora_n_timestamp_samples],
-            dtype=torch.long,
-            device=self.device,
-        )
+        
+        # Set model to training mode
+        self.unet_lora.train()
+        
+        # Ensure only LoRA parameters are set to require gradients
+        for param in self.unet_lora.parameters():
+            param.requires_grad = False
+        for param in self.lora_params:
+            param.requires_grad = True
 
-        noise = torch.randn_like(latents)
-        noisy_latents = self.scheduler_lora.add_noise(latents, noise, t)
-        if self.scheduler_lora.config.prediction_type == "epsilon":
-            target = noise
-        elif self.scheduler_lora.config.prediction_type == "v_prediction":
-            target = self.scheduler_lora.get_velocity(latents, noise, t)
-        else:
-            raise ValueError(
-                f"Unknown prediction type {self.scheduler_lora.config.prediction_type}"
+        # Use autocast for mixed precision training
+        with autocast():
+            t = torch.randint(
+                int(self.num_train_timesteps * 0.0),
+                int(self.num_train_timesteps * 1.0),
+                [B * self.cfg.lora_n_timestamp_samples],
+                dtype=torch.long,
+                device=self.device,
             )
-        latent_model_input = torch.cat([noisy_latents, image], dim=1)
-        # use view-independent text embeddings in LoRA
-        text_embeddings_cond, _ = text_embeddings.chunk(2)
-        if self.cfg.lora_cfg_training and random.random() < 0.1:
-            camera_condition = torch.zeros_like(camera_condition)
-        noise_pred = self.forward_unet(
-            self.unet_lora,
-            latent_model_input,
-            t,
-            encoder_hidden_states=text_embeddings_cond.repeat(
-                self.cfg.lora_n_timestamp_samples, 1, 1
-            ),
-            class_labels=camera_condition.view(B, -1).repeat(
-                self.cfg.lora_n_timestamp_samples, 1
-            ),
-            cross_attention_kwargs={"scale": 1.0},
-        )
-        return F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+
+            noise = torch.randn_like(latents)
+            noisy_latents = self.scheduler_lora.add_noise(latents, noise, t)
+            if self.scheduler_lora.config.prediction_type == "epsilon":
+                target = noise
+            elif self.scheduler_lora.config.prediction_type == "v_prediction":
+                target = self.scheduler_lora.get_velocity(latents, noise, t)
+            else:
+                raise ValueError(
+                    f"Unknown prediction type {self.scheduler_lora.config.prediction_type}"
+                )
+            latent_model_input = torch.cat([noisy_latents, image], dim=1)
+            text_embeddings_cond, _ = text_embeddings.chunk(2)
+            if self.cfg.lora_cfg_training and random.random() < 0.1:
+                camera_condition = torch.zeros_like(camera_condition)
+            noise_pred = self.forward_unet(
+                self.unet_lora,
+                latent_model_input,
+                t,
+                encoder_hidden_states=text_embeddings_cond.repeat(
+                    self.cfg.lora_n_timestamp_samples, 1, 1
+                ),
+                class_labels=camera_condition.view(B, -1).repeat(
+                    self.cfg.lora_n_timestamp_samples, 1
+                ),
+                cross_attention_kwargs={"scale": 1.0},
+            )
+            loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+
+        # Backward pass with gradient scaling
+        self.scaler.scale(loss).backward()
+        
+        # Update weights with gradient clipping
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.lora_params, max_norm=1.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        
+        # Update learning rate
+        self.lr_scheduler.step()
+        
+        # Update EMA model
+        self.ema.step_ema(self.ema_params, self.lora_params)
+        
+        # Zero gradients
+        self.optimizer.zero_grad()
+
+        return loss.item()
 
     def forward(
         self,
