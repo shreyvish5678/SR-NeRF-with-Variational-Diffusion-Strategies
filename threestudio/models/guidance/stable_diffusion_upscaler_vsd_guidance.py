@@ -199,13 +199,13 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             p.requires_grad_(False)
         for p in self.unet_lora.parameters():
             p.requires_grad_(False)
-
+    
         self.camera_embedding = ToWeightsDType(
             TimestepEmbedding(16, 1024), self.weights_dtype
         ).to(self.device)
         self.unet_lora.class_embedding = self.camera_embedding
         # set up LoRA layers
-        '''
+
         lora_attn_procs = {}
         for name, attn_block in self.unet_lora.attn_processors.items():
             cross_attention_dim = (
@@ -233,7 +233,25 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         )
         self.lora_layers._load_state_dict_pre_hooks.clear()
         self.lora_layers._state_dict_hooks.clear()
-        '''
+
+        self.lora_params = []
+        for name, module in self.unet_lora.named_modules():
+            if 'lora_' in name:
+                self.lora_params.extend(module.parameters())
+
+        # Initialize optimizer only for LoRA parameters
+        self.optimizer = AdamW(self.lora_params, lr=1e-4, weight_decay=1e-2)
+        
+        # Initialize learning rate scheduler
+        self.lr_scheduler = CosineAnnealingLR(self.optimizer, T_max=100000, eta_min=1e-6)
+        
+        # Initialize EMA
+        self.ema = EMA(beta=0.9999)
+        self.ema_params = [param.clone() for param in self.lora_params]
+        
+        # Initialize gradient scaler for mixed precision training
+        self.scaler = GradScaler()
+
         self.scheduler = DDPMScheduler.from_pretrained(
             self.cfg.pretrained_model_name_or_path,
             subfolder="scheduler",
