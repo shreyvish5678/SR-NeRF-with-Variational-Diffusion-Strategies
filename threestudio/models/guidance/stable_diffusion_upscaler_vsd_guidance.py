@@ -197,8 +197,6 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             p.requires_grad_(False)
         for p in self.unet.parameters():
             p.requires_grad_(False)
-        for p in self.unet_lora.parameters():
-            p.requires_grad_(False)
     
         self.camera_embedding = ToWeightsDType(
             TimestepEmbedding(16, 1024), self.weights_dtype
