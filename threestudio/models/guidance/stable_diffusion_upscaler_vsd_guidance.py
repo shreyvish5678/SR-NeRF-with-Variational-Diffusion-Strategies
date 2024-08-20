@@ -34,6 +34,35 @@ from threestudio.utils.typing import *
 import PIL
 import numpy as np
 
+import torch
+from torch.optim import AdamW
+from torch.cuda.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+class EMA:
+    def __init__(self, beta):
+        self.beta = beta
+        self.step = 0
+
+    def update_model_average(self, ma_model, current_model):
+        for current_params, ma_params in zip(current_model, ma_model):
+            old_weight, up_weight = ma_params.data, current_params.data
+            ma_params.data = self.update_average(old_weight, up_weight)
+
+    def update_average(self, old, new):
+        if old is None:
+            return new
+        return old * self.beta + (1 - self.beta) * new
+
+    def step_ema(self, ema_params, model_params, step_start_ema=2000):
+        if self.step < step_start_ema:
+            for ema_param, model_param in zip(ema_params, model_params):
+                ema_param.data.copy_(model_param.data)
+            self.step += 1
+            return
+        self.update_model_average(ema_params, model_params)
+        self.step += 1
+
 class ToWeightsDType(nn.Module):
     def __init__(self, module: nn.Module, dtype: torch.dtype):
         super().__init__()
