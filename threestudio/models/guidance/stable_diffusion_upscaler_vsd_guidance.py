@@ -778,7 +778,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         grad_img = None
         return grad, grad_img
 
-        def train_lora(
+    def train_lora(
         self,
         image: Float[Tensor, "B 3 256 256"],
         latents: Float[Tensor, "B 4 64 64"],
