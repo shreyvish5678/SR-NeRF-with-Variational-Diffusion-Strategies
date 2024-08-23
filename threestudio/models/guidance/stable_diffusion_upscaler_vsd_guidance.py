@@ -39,6 +39,16 @@ from torch.optim import AdamW
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+import torch
+import torch.nn.functional as F
+import random
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def setup_distributed():
+    torch.distributed.init_process_group(backend="nccl")
+    torch.cuda.set_device(torch.distributed.get_rank())
+    torch.manual_seed(0)
+
 class EMA:
     def __init__(self, beta):
         self.beta = beta
@@ -117,6 +127,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
 
     def configure(self) -> None:
         threestudio.info(f"Loading Stable Diffusion ...")
+        setup_distributed()
 
         self.weights_dtype = (
             torch.float16 if self.cfg.half_precision_weights else torch.float32
@@ -197,13 +208,15 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             p.requires_grad_(False)
         for p in self.unet.parameters():
             p.requires_grad_(False)
+        for p in self.unet_lora.parameters():
+            p.requires_grad_(False)
     
         self.camera_embedding = ToWeightsDType(
             TimestepEmbedding(16, 1024), self.weights_dtype
         ).to(self.device)
         self.unet_lora.class_embedding = self.camera_embedding
         # set up LoRA layers
-
+        print(self.unet_lora.attn_processors)
         lora_attn_procs = {}
         for name, attn_block in self.unet_lora.attn_processors.items():
             cross_attention_dim = (
@@ -231,10 +244,11 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         )
         self.lora_layers._load_state_dict_pre_hooks.clear()
         self.lora_layers._state_dict_hooks.clear()
+        
 
         self.lora_params = []
         for name, module in self.unet_lora.named_modules():
-            if 'lora_' in name:
+            if 'processor' in name and ('.down' in name or '.up' in name):
                 self.lora_params.extend(module.parameters())
 
         # Initialize optimizer only for LoRA parameters
@@ -289,6 +303,10 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         self.unet.to(self.device)
         if not self.single_model:
             self.unet_lora.to(self.device)
+            print("LoRA model loaded")
+        if self.unet == self.unet_lora:
+            print("Single model loaded")
+        self.unet_lora = DDP(unet_lora, device_ids=[torch.cuda.current_device()])
 
         self.scheduler_lora.config.prediction_type = "epsilon"
         self.scheduler.config.prediction_type = "epsilon"
@@ -793,12 +811,12 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         
         # Ensure only LoRA parameters are set to require gradients
         for param in self.unet_lora.parameters():
-            param.requires_grad = False
+            param.requires_grad_(False)
         for param in self.lora_params:
-            param.requires_grad = True
-
+            param.requires_grad_(True)
+        torch.cuda.empty_cache()
         # Use autocast for mixed precision training
-        with autocast():
+        with torch.cuda.amp.autocast(enabled=True):
             t = torch.randint(
                 int(self.num_train_timesteps * 0.0),
                 int(self.num_train_timesteps * 1.0),
@@ -821,6 +839,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             text_embeddings_cond, _ = text_embeddings.chunk(2)
             if self.cfg.lora_cfg_training and random.random() < 0.1:
                 camera_condition = torch.zeros_like(camera_condition)
+            print(torch.cuda.memory_summary(device=self.device, abbreviated=True))
             noise_pred = self.forward_unet(
                 self.unet_lora,
                 latent_model_input,
