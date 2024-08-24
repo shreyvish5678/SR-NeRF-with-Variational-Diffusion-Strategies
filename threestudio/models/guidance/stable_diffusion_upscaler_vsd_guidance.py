@@ -6,6 +6,7 @@ import time
 import warnings
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 import torch.nn.functional as F
 from diffusers import (
     DDPMScheduler,
@@ -38,16 +39,6 @@ import torch
 from torch.optim import AdamW
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
-
-import torch
-import torch.nn.functional as F
-import random
-from torch.nn.parallel import DistributedDataParallel as DDP
-
-def setup_distributed():
-    torch.distributed.init_process_group(backend="nccl")
-    torch.cuda.set_device(torch.distributed.get_rank())
-    torch.manual_seed(0)
 
 class EMA:
     def __init__(self, beta):
@@ -127,7 +118,6 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
 
     def configure(self) -> None:
         threestudio.info(f"Loading Stable Diffusion ...")
-        setup_distributed()
 
         self.weights_dtype = (
             torch.float16 if self.cfg.half_precision_weights else torch.float32
@@ -140,7 +130,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             "torch_dtype": self.weights_dtype,
         }
 
-        pipe_kwargs = {
+        pipe_lora_kwargs = {
             "tokenizer": None,
             "safety_checker": None,
             "feature_extractor": None,
@@ -156,22 +146,15 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             self.cfg.pretrained_model_name_or_path,
             **pipe_kwargs,
         )
-        if (
-            self.cfg.pretrained_model_name_or_path
-            == self.cfg.pretrained_model_name_or_path_lora
-        ):
-            self.single_model = True
-            pipe_lora = pipe
-        
-        else:
-            self.single_model = False
-            pipe_lora = StableDiffusionUpscalePipeline(
-                self.cfg.pretrained_model_name_or_path_lora,
-                **pipe_lora_kwargs,
-            )
-            del pipe_lora.vae
-            cleanup()
-            pipe_lora.vae = pipe.vae
+
+        self.single_model = False
+        pipe_lora = StableDiffusionUpscalePipeline.from_pretrained(
+            self.cfg.pretrained_model_name_or_path_lora,
+            **pipe_lora_kwargs,
+        )
+        del pipe_lora.vae
+        cleanup()
+        pipe_lora.vae = pipe.vae
         self.submodules = SubModules(pipe=pipe, pipe_lora=pipe_lora)
 
         if self.cfg.enable_memory_efficient_attention:
@@ -210,13 +193,15 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             p.requires_grad_(False)
         for p in self.unet_lora.parameters():
             p.requires_grad_(False)
+        self.unet.eval()
+        self.vae.eval()
+        self.unet_lora.eval()
     
         self.camera_embedding = ToWeightsDType(
             TimestepEmbedding(16, 1024), self.weights_dtype
         ).to(self.device)
         self.unet_lora.class_embedding = self.camera_embedding
         # set up LoRA layers
-        print(self.unet_lora.attn_processors)
         lora_attn_procs = {}
         for name, attn_block in self.unet_lora.attn_processors.items():
             cross_attention_dim = (
@@ -237,29 +222,20 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             )
 
         self.unet_lora.set_attn_processor(lora_attn_procs)
-
         # Print the processor attribute of the attn1 module
-        self.lora_layers = AttnProcsLayers(self.unet_lora.attn_processors).to(
-            self.device
-        )
-        self.lora_layers._load_state_dict_pre_hooks.clear()
-        self.lora_layers._state_dict_hooks.clear()
+        for name, attn_processor in self.unet_lora.attn_processors.items():
+            if isinstance(attn_processor, LoRAAttnProcessor):
+                for param in attn_processor.parameters():
+                    param.requires_grad_(True)
+        
         
 
-        self.lora_params = []
-        for name, module in self.unet_lora.named_modules():
-            if 'processor' in name and ('.down' in name or '.up' in name):
-                self.lora_params.extend(module.parameters())
-
-        # Initialize optimizer only for LoRA parameters
-        self.optimizer = AdamW(self.lora_params, lr=1e-4, weight_decay=1e-2)
-        
+        self.optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.unet_lora.parameters()), lr=1e-4)
         # Initialize learning rate scheduler
-        self.lr_scheduler = CosineAnnealingLR(self.optimizer, T_max=100000, eta_min=1e-6)
         
         # Initialize EMA
-        self.ema = EMA(beta=0.9999)
-        self.ema_params = [param.clone() for param in self.lora_params]
+        #self.ema = EMA(beta=0.9999)
+        #self.ema_params = [param.clone() for param in filter(lambda p: p.requires_grad, self.unet_lora.parameters())]
         
         # Initialize gradient scaler for mixed precision training
         self.scaler = GradScaler()
@@ -303,10 +279,6 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         self.unet.to(self.device)
         if not self.single_model:
             self.unet_lora.to(self.device)
-            print("LoRA model loaded")
-        if self.unet == self.unet_lora:
-            print("Single model loaded")
-        self.unet_lora = DDP(unet_lora, device_ids=[torch.cuda.current_device()])
 
         self.scheduler_lora.config.prediction_type = "epsilon"
         self.scheduler.config.prediction_type = "epsilon"
@@ -658,7 +630,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         return latents.to(input_dtype)
 
     @torch.cuda.amp.autocast(enabled=False)
-    # @torch.no_grad()
+    @torch.no_grad()
     def decode_latents(
         self, latents: Float[Tensor, "B 4 H/4 W/4"],
     ) -> Float[Tensor, "B 3 H W"]:
@@ -694,52 +666,53 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         B = latents.shape[0]
 
         with torch.no_grad():
+            with torch.cuda.amp.autocast(enabled=False):
             # random timestamp
-            if self.cfg.random_timestep:
-                t = torch.randint(
-                    self.min_step,
-                    self.max_step + 1,
-                    [B],
-                    dtype=torch.long,
-                    device=self.device,
-                )
-            else:
-                t = torch.full([B], self.max_step, dtype=torch.long, device=self.device)
+                if self.cfg.random_timestep:
+                    t = torch.randint(
+                        self.min_step,
+                        self.max_step + 1,
+                        [B],
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+                else:
+                    t = torch.full([B], self.max_step, dtype=torch.long, device=self.device)
 
-            last_timestep = t[0].detach().cpu().numpy()
-            self.last_timestep = torch.tensor(last_timestep)
+                last_timestep = t[0].detach().cpu().numpy()
+                self.last_timestep = torch.tensor(last_timestep)
 
-            # add noise
-            noise = torch.randn_like(latents)
-            latents_noisy = self.scheduler.add_noise(latents, noise, t)
-            # pred noise
-            latent_model_input = torch.cat([latents_noisy, image], dim=1)
-            latent_model_input = torch.cat([latent_model_input] * 2)
-            with self.disable_unet_class_embedding(self.unet) as unet:
-                cross_attention_kwargs = {"scale": 0.0} if self.single_model else None
-                noise_pred_pretrain = self.forward_unet(
-                    unet,
+                # add noise
+                noise = torch.randn_like(latents)
+                latents_noisy = self.scheduler.add_noise(latents, noise, t)
+                # pred noise
+                latent_model_input = torch.cat([latents_noisy, image], dim=1)
+                latent_model_input = torch.cat([latent_model_input] * 2)
+                with self.disable_unet_class_embedding(self.unet) as unet:
+                    cross_attention_kwargs = {"scale": 0.0} if self.single_model else None
+                    noise_pred_pretrain = self.forward_unet(
+                        unet,
+                        latent_model_input,
+                        torch.cat([t] * 2),
+                        encoder_hidden_states=text_embeddings_vd.to(self.weights_dtype),
+                        cross_attention_kwargs=cross_attention_kwargs,
+                    )
+                # use view-independent text embeddings in LoRA
+                text_embeddings_cond, _ = text_embeddings.chunk(2)
+                noise_pred_est = self.forward_unet(
+                    self.unet_lora,
                     latent_model_input,
                     torch.cat([t] * 2),
-                    encoder_hidden_states=text_embeddings_vd.to(self.weights_dtype),
-                    cross_attention_kwargs=cross_attention_kwargs,
+                    encoder_hidden_states=torch.cat([text_embeddings_cond] * 2),
+                    class_labels=torch.cat(
+                        [
+                            camera_condition.view(B, -1),
+                            torch.zeros_like(camera_condition.view(B, -1)),
+                        ],
+                        dim=0,
+                    ),
+                    cross_attention_kwargs={"scale": 1.0},
                 )
-            # use view-independent text embeddings in LoRA
-            text_embeddings_cond, _ = text_embeddings.chunk(2)
-            noise_pred_est = self.forward_unet(
-                self.unet_lora,
-                latent_model_input,
-                torch.cat([t] * 2),
-                encoder_hidden_states=torch.cat([text_embeddings_cond] * 2),
-                class_labels=torch.cat(
-                    [
-                        camera_condition.view(B, -1),
-                        torch.zeros_like(camera_condition.view(B, -1)),
-                    ],
-                    dim=0,
-                ),
-                cross_attention_kwargs={"scale": 1.0},
-            )
 
         (
             noise_pred_pretrain_text,
@@ -810,13 +783,9 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         self.unet_lora.train()
         
         # Ensure only LoRA parameters are set to require gradients
-        for param in self.unet_lora.parameters():
-            param.requires_grad_(False)
-        for param in self.lora_params:
-            param.requires_grad_(True)
-        torch.cuda.empty_cache()
+
         # Use autocast for mixed precision training
-        with torch.cuda.amp.autocast(enabled=True):
+        with autocast(enabled=True):
             t = torch.randint(
                 int(self.num_train_timesteps * 0.0),
                 int(self.num_train_timesteps * 1.0),
@@ -839,7 +808,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             text_embeddings_cond, _ = text_embeddings.chunk(2)
             if self.cfg.lora_cfg_training and random.random() < 0.1:
                 camera_condition = torch.zeros_like(camera_condition)
-            print(torch.cuda.memory_summary(device=self.device, abbreviated=True))
+            
             noise_pred = self.forward_unet(
                 self.unet_lora,
                 latent_model_input,
@@ -853,23 +822,14 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
                 cross_attention_kwargs={"scale": 1.0},
             )
             loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-
         # Backward pass with gradient scaling
         self.scaler.scale(loss).backward()
         
         # Update weights with gradient clipping
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.lora_params, max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.unet_lora.parameters()), max_norm=1.0)
         self.scaler.step(self.optimizer)
         self.scaler.update()
-        
-        # Update learning rate
-        self.lr_scheduler.step()
-        
-        # Update EMA model
-        self.ema.step_ema(self.ema_params, self.lora_params)
-        
-        # Zero gradients
         self.optimizer.zero_grad()
 
         return loss.item()
@@ -941,7 +901,6 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
             camera_condition = c2w
         indices = torch.randint(0, camera_condition.shape[0], (image.shape[0],), device=self.device)
         camera_condition = camera_condition[indices]
-
         grad, grad_img = self.compute_grad_vsd(
             latents, image, text_embeddings_vd, text_embeddings, camera_condition
         )
