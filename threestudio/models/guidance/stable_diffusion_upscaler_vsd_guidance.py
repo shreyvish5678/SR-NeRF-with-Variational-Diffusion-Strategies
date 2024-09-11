@@ -85,6 +85,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         enable_channels_last_format: bool = False
         guidance_scale: float = 7.5
         guidance_scale_lora: float = 7.5
+        every_n_steps_lora: int = 3
         grad_clip: Optional[
             Any
         ] = None  # field(default_factory=lambda: [0, 2.0, 8.0, 1000])
@@ -122,6 +123,8 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         self.weights_dtype = (
             torch.float16 if self.cfg.half_precision_weights else torch.float32
         )
+
+        self.step = 0
 
         pipe_kwargs = {
             "tokenizer": None,
@@ -912,7 +915,8 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         batch_size = latents.shape[0]
         target = (latents - grad).detach()
         loss_vsd = 0.5 * F.mse_loss(latents, target, reduction="sum") / batch_size
-        loss_lora = self.train_lora(image, latents, text_embeddings, camera_condition)
+        if self.step % cfg.every_n_steps_lora == 0:
+            loss_lora = self.train_lora(image, latents, text_embeddings, camera_condition)
 
         loss_dict = {
             "loss_vsd": loss_vsd,
