@@ -914,7 +914,7 @@ class StableDiffusionUpscalerVSDGuidance(BaseModule):
         assert self.cfg.guidance_type in ['vsd']
         batch_size = latents.shape[0]
         target = (latents - grad).detach()
-        loss_vsd = 0.5 * F.mse_loss(latents, target, reduction="sum") / batch_size
+        loss_vsd = 0.5 * F.l1_loss(latents, target, reduction="sum") / batch_size
         if self.step % cfg.every_n_steps_lora == 0:
             loss_lora = self.train_lora(image, latents, text_embeddings, camera_condition)
 
