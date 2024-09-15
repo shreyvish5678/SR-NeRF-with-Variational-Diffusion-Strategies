@@ -9,4 +9,4 @@ conda activate nerf-sr-vsd
 
 pip install -r requirements.txt
 ```
-Please look through the following projects and install their dependencies as well: (pytorch3d)[https://github.com/facebookresearch/pytorch3d], (tinycudann)[https://github.com/NVlabs/tiny-cuda-nn], and (threestudio)[https://github.com/threestudio-project/threestudio]
+Please look through the following projects and install their dependencies as well: pytorch3d(https://github.com/facebookresearch/pytorch3d), tinycudann(https://github.com/NVlabs/tiny-cuda-nn), and threestudio(https://github.com/threestudio-project/threestudio)
