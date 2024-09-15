@@ -1,3 +1,7 @@
+# Abstract
+
+We present a novel method for diffusion-guided frameworks for view-consistent super-resolution (SR) in neural rendering. Our approach leverages existing 2D SR models in conjunction with advanced techniques such as Variational Score Distilling (VSD) and a LoRA fine-tuning helper, with spatial training to significantly boost the quality and consistency of upscaled 2D images compared to the previous methods in the literature, such as Renoised Score Distillation (RSD) proposed in DiSR-NeRF, or SDS proposed in DreamFusion. The VSD score facilitates precise fine-tuning of SR models, resulting in high-quality, view-consistent images. To address the common challenge of inconsistencies among independent SR 2D images, we integrate Iterative 3D Synchronization (I3DS) from the DiSR-NeRF framework. Our quantitative benchmarks and qualitative results on the LLFF dataset demonstrate the superior performance of our system compared to existing methods such as DiSR-NeRF.
+
 # Installation
 
 ```bash
