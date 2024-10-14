@@ -5,8 +5,8 @@ We present a novel method for diffusion-guided frameworks for view-consistent su
 # Installation
 
 ```bash
-git clone https://github.com/shreyvish5678/Advancing-Super-Resolution-in-Neural-Radiance-Fields-via-Variational-Diffusion-Strategies
-cd Advancing-Super-Resolution-in-Neural-Radiance-Fields-via-Variational-Diffusion-Strategies
+git clone https://github.com/shreyvish5678/SR-NeRF-with-Variational-Diffusion-Strategies
+cd SR-NeRF-with-Variational-Diffusion-Strategies
 
 conda create --name nerf-sr-vsd
 conda activate nerf-sr-vsd
